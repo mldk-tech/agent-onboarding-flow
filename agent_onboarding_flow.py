@@ -4,6 +4,7 @@ import pandas as pd
 import io
 import datetime
 import json
+from typing import Optional
 
 # --- Short-term Memory (Ephemeral) ---
 conversation_buffer = []
@@ -43,6 +44,22 @@ def route_to_module(task: str) -> str:
     }
     return routes.get(task, "/dashboard")
 
+def generate_upload_prompt(user_context: dict) -> str:
+    if not user_context.get("csv_uploaded"):
+        return (
+            "Let's get started! Please upload a CSV file with your tenants. "
+            "Make sure it includes 'tenant_name', 'email', and 'contract_start' columns. "
+            "Need help? You can download a sample file here: [sample link]."
+        )
+    elif user_context.get("last_tool_error"):
+        missing = ', '.join(user_context["last_tool_error"])
+        return (
+            f"It looks like your last file was missing the following fields: {missing}. "
+            "Please re-upload with those columns included."
+        )
+    else:
+        return "Ready for the next step? Go ahead and upload your CSV file again."
+
 # --- LLM Integration (stubbed call) ---
 def call_openai(prompt: str) -> str:
     # Placeholder for LLM API call
@@ -70,7 +87,7 @@ def decision_by_llm(intent: str, memory: dict) -> str:
     return call_openai(system_prompt + user_prompt).strip()
 
 # --- Agent Monitoring Loop ---
-def agent_main_loop(user_input: str, user_id: str, file_bytes: bytes = None):
+def agent_main_loop(user_input: str, user_id: str, file_bytes: Optional[bytes] = None):
     persistent_memory["user_id"] = user_id
     intent = recognize_intent(user_input)
     action = decision_by_llm(intent, persistent_memory)
@@ -82,7 +99,7 @@ def agent_main_loop(user_input: str, user_id: str, file_bytes: bytes = None):
     })
 
     if action == "prompt_user_to_upload_csv":
-        return "Please upload your tenant CSV file."
+        return generate_upload_prompt(persistent_memory)
 
     if action == "validate_csv":
         if file_bytes:
