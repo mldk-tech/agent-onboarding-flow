@@ -1,4 +1,8 @@
+# requirements.txt
+fastapi
+uvicorn
+pandas
 requests
-pandas 
-openai
-datetime
+python-multipart
+openai  # Optional, if integrated with LLM
+transformers  # Optional, if tokenizer monitoring is added

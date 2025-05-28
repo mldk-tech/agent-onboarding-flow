@@ -1,4 +1,4 @@
-# --- Agent Onboarding Flow with LLM Integration ---
+# --- Agent Onboarding Flow with LLM Integration and Tag Enrichment ---
 import requests
 import pandas as pd
 import io
@@ -18,7 +18,8 @@ persistent_memory = {
     "last_tool_error": None,
     "completed_steps": [],
     "failed_attempts": [],
-    "timestamps": {}
+    "timestamps": {},
+    "enriched_tags": []
 }
 
 # --- Tools ---
@@ -34,7 +35,8 @@ def validate_csv(file_bytes: bytes) -> dict:
     missing = required_columns - set(df.columns)
     return {
         "valid": len(missing) == 0,
-        "missing_fields": list(missing)
+        "missing_fields": list(missing),
+        "df": df if len(missing) == 0 else None
     }
 
 def route_to_module(task: str) -> str:
@@ -44,26 +46,32 @@ def route_to_module(task: str) -> str:
     }
     return routes.get(task, "/dashboard")
 
-def generate_upload_prompt(user_context: dict) -> str:
-    if not user_context.get("csv_uploaded"):
-        return (
-            "Let's get started! Please upload a CSV file with your tenants. "
-            "Make sure it includes 'tenant_name', 'email', and 'contract_start' columns. "
-            "Need help? You can download a sample file here: [sample link]."
-        )
-    elif user_context.get("last_tool_error"):
-        missing = ', '.join(user_context["last_tool_error"])
-        return (
-            f"It looks like your last file was missing the following fields: {missing}. "
-            "Please re-upload with those columns included."
-        )
-    else:
-        return "Ready for the next step? Go ahead and upload your CSV file again."
-
 # --- LLM Integration (stubbed call) ---
 def call_openai(prompt: str) -> str:
-    # Placeholder for LLM API call
-    return "prompt_user_to_upload_csv"
+    # Check if this is an intent recognition or decision making call
+    if "Classify the intent" in prompt:
+        # Intent recognition
+        if "upload" in prompt.lower() or "import" in prompt.lower() or "tenant" in prompt.lower():
+            return "import_tenants"
+        elif "payment" in prompt.lower() or "setup" in prompt.lower():
+            return "setup_payments"
+        return "unknown"
+    else:
+        # Decision making
+        if "import_tenants" in prompt:
+            # Parse the memory state from the prompt
+            memory_str = prompt.split("Memory: ")[1].strip()
+            memory = json.loads(memory_str)
+            
+            if not memory.get("csv_uploaded", False):
+                return "prompt_user_to_upload_csv"
+            elif not memory.get("csv_validated", False):
+                return "validate_csv"
+            else:
+                return "/dashboard/tenants/import"
+        elif "setup_payments" in prompt:
+            return "/dashboard/payments/setup"
+        return "fallback_to_template"
 
 def recognize_intent(user_input: str, context: str = "") -> str:
     prompt = f"""
@@ -86,20 +94,51 @@ def decision_by_llm(intent: str, memory: dict) -> str:
     """
     return call_openai(system_prompt + user_prompt).strip()
 
+
+# --- Enrichment Process ---
+def enrich_tags(df):
+    tags = []
+    now = datetime.datetime.utcnow().date()
+    email_counts = df["email"].value_counts()
+
+    for _, row in df.iterrows():
+        start_date = pd.to_datetime(row["contract_start"]).date()
+        if (now - start_date).days > 365:
+            tags.append("long_term_tenant")
+        if start_date > now:
+            tags.append("future_contract_tag")
+        if email_counts[row["email"]] > 1:
+            tags.append("shared_contact_tag")
+        if not isinstance(row["tenant_name"], str) or len(row["tenant_name"].split()) < 1:
+            tags.append("name_format_anomaly")
+
+    return list(set(tags))
+
 # --- Agent Monitoring Loop ---
 def agent_main_loop(user_input: str, user_id: str, file_bytes: Optional[bytes] = None):
     persistent_memory["user_id"] = user_id
+    
+    # If we have a file, mark it as uploaded immediately
+    if file_bytes:
+        persistent_memory["csv_uploaded"] = True
+    
     intent = recognize_intent(user_input)
+    print(f"DEBUG: Recognized intent: {intent}")  # Debug log
     action = decision_by_llm(intent, persistent_memory)
+    print(f"DEBUG: Decided action: {action}")  # Debug log
+    print(f"DEBUG: Memory state: {persistent_memory}")  # Debug log
 
     conversation_buffer.append({
-        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "timestamp": datetime.datetime.now().isoformat(),
         "intent": intent,
         "action": action
     })
 
     if action == "prompt_user_to_upload_csv":
-        return generate_upload_prompt(persistent_memory)
+        if file_bytes:
+            persistent_memory["csv_uploaded"] = True
+            return "File received. Validating..."
+        return "Please upload your tenant CSV file."
 
     if action == "validate_csv":
         if file_bytes:
@@ -110,7 +149,9 @@ def agent_main_loop(user_input: str, user_id: str, file_bytes: Optional[bytes] =
                 persistent_memory["failed_attempts"].append("validate_csv")
                 return f"Missing fields: {result['missing_fields']}"
             persistent_memory["completed_steps"].append("validate_csv")
-            return "File validated successfully. Proceeding to import."
+            # Run enrichment
+            persistent_memory["enriched_tags"] = enrich_tags(result["df"])
+            return "File validated and enriched successfully. Proceeding to import."
         else:
             return "No file uploaded. Please provide a CSV."
 
@@ -127,4 +168,4 @@ def agent_main_loop(user_input: str, user_id: str, file_bytes: Optional[bytes] =
     return "Unable to process your request. Please contact support."
 
 # --- Example Run ---
-# print(agent_main_loop("I want to upload tenant info", "user_123"))
+#print(agent_main_loop("I want to upload tenant info", "user_123"))
